@@ -12,10 +12,25 @@ import (
 	"os"
 	path2 "path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 )
+
+type TaskPool[T interface{}] struct {
+	out      chan T
+	taskChan chan bool
+}
+
+func (pool *TaskPool[T]) spawnTask(task func() T) {
+	pool.taskChan <- true
+	go func() {
+		result := task()
+		<-pool.taskChan
+		pool.out <- result
+	}()
+}
 
 var urlRegex, _ = regexp.Compile("http://workshop\\d+.abcvg.info/archive/\\d+.\\d+.zip")
 
@@ -118,6 +133,10 @@ func DownloadFile(filepath string, url string) error {
 	return err
 }
 
+func lineReader() {
+
+}
+
 func main() {
 	app := &cli.App{
 		Name:  "workshopUtil",
@@ -125,8 +144,79 @@ func main() {
 		Commands: []*cli.Command{
 			{
 				Name:    "download",
-				Usage:   "download steam workshop items",
+				Usage:   "download content from generated links",
 				Aliases: []string{"d"},
+				Flags: []cli.Flag{
+					&cli.PathFlag{
+						Name:  "path",
+						Value: "",
+						Usage: "output folder to download content",
+					},
+					&cli.BoolFlag{
+						Name:    "verbose",
+						Value:   false,
+						Usage:   "show verbose information",
+						Aliases: []string{"v"},
+					},
+				},
+				Action: func(context *cli.Context) error {
+					path := context.Path("path")
+					// verbose := context.Bool("verbose")
+					args := context.Args().Slice()
+
+					urls := make([]string, 0)
+
+					for _, arg := range args {
+						data, err := os.ReadFile(arg)
+						if err == nil {
+							str := string(data)
+							splited := strings.Split(str, "\n")
+
+							urls = append(urls, splited...)
+
+							continue
+						}
+
+						urls = append(urls, arg)
+					}
+
+					println("retrieved", len(urls), "download links")
+
+					p, err := filepath.Abs(path)
+					if err != nil {
+						return err
+					}
+
+					pool := TaskPool[interface{}]{
+						out:      make(chan interface{}),
+						taskChan: make(chan bool, 4),
+					}
+
+					defer close(pool.taskChan)
+					defer close(pool.out)
+
+					go func() {
+						<-pool.out
+					}()
+
+					for _, url := range urls {
+						pool.spawnTask(func() interface{} {
+							path := path2.Join(p, strconv.Itoa(rand.Intn(999999))+".zip")
+							println("downloading", url, path)
+							DownloadFile(path, url)
+							println("downloaded", url, path)
+							return nil
+						})
+					}
+					println("finished downloading")
+
+					return nil
+				},
+			},
+			{
+				Name:    "generate",
+				Usage:   "generate download link for steam workshop items",
+				Aliases: []string{"g"},
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "path",
@@ -217,10 +307,26 @@ func main() {
 							return err
 						}
 
+						pool := TaskPool[interface{}]{
+							out:      make(chan interface{}),
+							taskChan: make(chan bool, 4),
+						}
+
+						defer close(pool.taskChan)
+						defer close(pool.out)
+
+						go func() {
+							<-pool.out
+						}()
+
 						for _, url := range urls {
-							path := path2.Join(p, strconv.Itoa(rand.Intn(999999))+".zip")
-							println("downloading", url, path)
-							DownloadFile(path, url)
+							pool.spawnTask(func() interface{} {
+								path := path2.Join(p, strconv.Itoa(rand.Intn(9_999_999))+".zip")
+								println("downloading", url, path)
+								DownloadFile(path, url)
+								println("downloader", url, path)
+								return nil
+							})
 						}
 						println("finished downloading")
 					}
@@ -248,29 +354,43 @@ func main() {
 				Action: func(context *cli.Context) error {
 					path := context.Path("path")
 					verbose := context.Bool("verbose")
-					url := context.Args().Get(0)
-					if url == "" {
+					urls := context.Args().Slice()
+					if len(urls) == 0 {
 						return fmt.Errorf("unspecified url to steam workshop")
 					}
 
-					uri, err := url2.Parse(url)
-					if err != nil {
-						return err
+					data := make([]string, 0)
+
+					for _, url := range urls {
+						uri, err := url2.Parse(url)
+						if err != nil {
+							println("invalid url", url)
+							continue
+						}
+						data = append(data, scrapeCollections(uri.String(), verbose)...)
 					}
 
-					data := scrapeCollections(uri.String(), verbose)
+					set := make(map[string]interface{})
+
+					for _, item := range data {
+						set[item] = 0
+					}
+
+					for i, item := range reflect.ValueOf(set).MapKeys() {
+						data[i] = item.String()
+					}
 
 					if path == "" {
 						for _, item := range data {
 							println(item)
 						}
-						println("resolved", len(data), "items from", uri.String())
+						println("resolved", len(data))
 					} else {
 						saveResolved(path, data)
 
 						p, _ := filepath.Abs(path)
 
-						println("saved", len(data), "items from", uri.String(), "into", p)
+						println("saved", len(data), "into", p)
 					}
 					return nil
 				},
